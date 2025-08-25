@@ -20,7 +20,7 @@ st.set_page_config(page_title="SafeScore Dashboard", layout="wide")
 # --- paths ---
 THIS_FILE = Path(__file__).resolve()
 ROOT = THIS_FILE.parents[2]            # <repo_root>
-DATA_DIR = ROOT / "app" / "data"
+DATA_DIR = Path("app/data")
 
 # GARANTE QUE O ROOT ESTEJA NO sys.path (necessário para importar gerar_relatorio.py)
 if str(ROOT) not in sys.path:
