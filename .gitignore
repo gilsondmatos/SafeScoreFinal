@@ -8,8 +8,6 @@ __pycache__/
 .venv/
 *.log
 
-# Streamlit
-.streamlit/secrets.toml
 
 # VSCode / OS
 .vscode/
@@ -19,6 +17,4 @@ Thumbs.db
 # Test / Cache
 .pytest_cache/
 
-# Dados de execução
-app/data/*.csv
-app/data/*.pdf
+
