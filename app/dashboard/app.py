@@ -1,6 +1,17 @@
+# -*- coding: utf-8 -*-
+"""
+Dashboard SafeScore (Streamlit)
+- Resolve automaticamente app/data (local e Streamlit Cloud)
+- Botão 'Coletar agora (ETH)' executando main.py em subprocesso (evita set_page_config duplo)
+- KPIs, filtros, explicações por regra (%) e PDF
+
+Não altera a lógica do engine.
+"""
+
 import os
 import sys
 import json
+import subprocess
 from pathlib import Path
 from typing import List, Dict
 
@@ -13,15 +24,11 @@ st.set_page_config(page_title="SafeScore Dashboard", layout="wide")
 
 # ---------------------- Resolução robusta do app/data ----------------------
 def _possiveis_data_dirs() -> List[Path]:
-    """Candidatos mais comuns de onde fica a pasta de dados no deploy/local."""
     here = Path(__file__).resolve()
     return [
-        # /app/dashboard/app.py  -> /app/data
-        here.parents[1] / "data",
-        # repo_root/app/data (quando app/dashboard está dois níveis abaixo)
-        here.parents[2] / "app" / "data",
-        # caminhos relativos (fallbacks)
-        Path("app/data").resolve(),
+        here.parents[1] / "data",            # /app/dashboard/app.py -> /app/data
+        here.parents[2] / "app" / "data",    # repo_root/app/data
+        Path("app/data").resolve(),          # fallbacks
         Path("app").resolve() / "data",
     ]
 
@@ -29,21 +36,17 @@ def _resolver_data_dir() -> Path:
     for p in _possiveis_data_dirs():
         if p.exists() and p.is_dir():
             return p
-    # Se nada existir, criamos o melhor candidato (primeiro da lista)
     p0 = _possiveis_data_dirs()[0]
     p0.mkdir(parents=True, exist_ok=True)
     return p0
 
 DATA_DIR = _resolver_data_dir()
-
-# Garantir que o diretório raiz do repo esteja no sys.path para imports como gerar_relatorio / main
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# ---------------------- Utilidades ----------------------
+# ---------------------- Utils ----------------------
 def lazy_import_relatorio():
-    """Importa gerar_relatorio.py sob demanda (evita custo no load do app)."""
     import importlib
     return importlib.import_module("gerar_relatorio")
 
@@ -62,7 +65,6 @@ def load_df(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
 def list_transaction_files() -> List[Path]:
-    # Busca somente os CSVs de transações padronizados
     return sorted([p for p in DATA_DIR.glob("transactions*.csv") if p.is_file()])
 
 def parse_contrib_dict(explain_str: str) -> Dict[str, float]:
@@ -81,55 +83,56 @@ col_run, _ = st.columns([1, 4])
 with col_run:
     if st.button("⚡ Coletar agora (ETH)", help="Executa o main.py com coletor 'eth' e atualiza os CSVs"):
         try:
-            os.environ["COLLECTOR"] = "eth"  # garante coletor
-            # Import preguiçoso do main para não pesar o load do app
-            import importlib
-            main_mod = importlib.import_module("main")
-            # Executa pipeline completa (coletar → pontuar → salvar CSV/pendências/alertas)
-            main_mod.main()
-            st.success("Coleta executada com sucesso. Recarregando arquivos...")
-            st.experimental_rerun()
+            env = os.environ.copy()
+            env["COLLECTOR"] = "eth"  # força coletor on-chain
+            # Executa a pipeline em subprocesso para isolar o Streamlit (evita set_page_config duplicado)
+            cmd = [sys.executable, str(REPO_ROOT / "main.py")]
+            proc = subprocess.run(
+                cmd,
+                cwd=str(REPO_ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=360,
+            )
+            if proc.returncode != 0:
+                st.error(
+                    "Falha ao coletar dados on-chain:\n"
+                    f"retcode={proc.returncode}\n\nSTDERR:\n{proc.stderr.strip()}"
+                )
+            else:
+                st.success("Coleta executada com sucesso. Recarregando arquivos…")
+                with st.expander("Log da coleta"):
+                    # mostra só o final para não poluir
+                    tail = proc.stdout[-2000:] if proc.stdout else "(sem saída)"
+                    st.code(tail)
+                st.experimental_rerun()
         except Exception as e:
             st.error(f"Falha ao coletar dados on-chain: {e}")
 
 # ---------------------- Seleção de arquivo ----------------------
 files = list_transaction_files()
-
-# Diagnóstico quando a pasta está vazia no deploy
 if not files:
-    with st.container():
-        st.info("Nenhum CSV encontrado em app/data. Rode `python main.py` localmente ou use o botão acima para gerar os dados.")
-        # Informação extra de debug para saber o que o app está enxergando
-        st.caption("Diagnóstico rápido (arquivos visíveis neste diretório):")
-        try:
-            st.code("\n".join([str(p) for p in DATA_DIR.glob('*.csv')]) or "(vazio)")
-        except Exception:
-            st.code("(não foi possível listar)")
+    st.info("Nenhum CSV encontrado em app/data. Rode `python main.py` localmente ou use o botão acima para gerar os dados.")
+    st.caption("Diagnóstico rápido (arquivos .csv visíveis):")
+    try:
+        st.code("\n".join([str(p) for p in DATA_DIR.glob('*.csv')]) or "(vazio)")
+    except Exception:
+        st.code("(não foi possível listar)")
     st.stop()
 
 default_idx = len(files) - 1
-sel = st.selectbox(
-    "Arquivo de transações",
-    options=files,
-    index=default_idx,
-    format_func=lambda p: p.name
-)
+sel = st.selectbox("Arquivo de transações", options=files, index=default_idx, format_func=lambda p: p.name)
 df = load_df(sel)
 
-# ---------------------- Parâmetros e filtros ----------------------
+# ---------------------- Parâmetros & filtros ----------------------
 threshold = load_threshold()
 st.sidebar.header("Filtros")
-
-# Parâmetros (limiar)
 st.sidebar.markdown("### Parâmetros")
-threshold = st.sidebar.number_input(
-    "Limiar de alerta (score < x)", min_value=0, max_value=100, value=threshold, step=1
-)
+threshold = st.sidebar.number_input("Limiar de alerta (score < x)", min_value=0, max_value=100, value=threshold, step=1)
 
-# Filtros
 tokens = ["(todos)"] + sorted(df.get("token", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
 token_sel = st.sidebar.selectbox("Token", tokens, index=0)
-
 addr_query = st.sidebar.text_input("Filtro por endereço (contém)", "")
 score_min, score_max = st.sidebar.slider("Faixa de score", 0, 100, (0, 100))
 show_explain = st.sidebar.checkbox("Mostrar contribuição por regra (%)", value=True)
@@ -137,14 +140,12 @@ show_explain = st.sidebar.checkbox("Mostrar contribuição por regra (%)", value
 filtered = df.copy()
 if token_sel != "(todos)":
     filtered = filtered[filtered["token"].astype(str) == token_sel]
-
 if addr_query.strip():
     q = addr_query.strip().lower()
     filtered = filtered[
         filtered["from_address"].astype(str).str.lower().str.contains(q) |
         filtered["to_address"].astype(str).str.lower().str.contains(q)
     ]
-
 filtered = filtered[(filtered["score"] >= score_min) & (filtered["score"] <= score_max)]
 
 # ---------------------- KPIs ----------------------
@@ -160,14 +161,12 @@ k3.metric("Críticas (< limiar)", f"{criticos}")
 # ---------------------- Gráfico ----------------------
 st.subheader("Distribuição por token")
 try:
-    # Conta por token (somente linhas do filtro)
     g = filtered.groupby("token", dropna=False)["tx_id"].count().reset_index()
     g.columns = ["token", "count"]
     chart = (
         alt.Chart(g)
         .mark_bar()
-        .encode(x=alt.X("token:N", sort="-y", title="Token"),
-                y=alt.Y("count:Q", title="Transações"))
+        .encode(x=alt.X("token:N", sort="-y", title="Token"), y=alt.Y("count:Q", title="Transações"))
         .properties(height=320)
     )
     st.altair_chart(chart, use_container_width=True)
@@ -176,7 +175,6 @@ except Exception:
 
 # ---------------------- Tabela principal ----------------------
 st.subheader("Transações")
-
 df_show = filtered.copy()
 if show_explain and "explain" in df_show.columns:
     contrib_series = df_show["explain"].apply(parse_contrib_dict)
@@ -194,20 +192,17 @@ else:
         st.info("Arquivo sem coluna 'explain'. Rode `python main.py` novamente para gerar explicações por regra.")
     st.dataframe(df_show.sort_values(by="timestamp", ascending=False), use_container_width=True, height=420)
 
-# ---------------------- Inspector por transação ----------------------
+# ---------------------- Explicabilidade por transação ----------------------
 st.markdown("### Explicabilidade (por transação)")
 if not filtered.empty:
     tx_ids = filtered["tx_id"].astype(str).tolist()
     sel_tx = st.selectbox("Selecione a transação", options=tx_ids, index=0)
     row = filtered[filtered["tx_id"].astype(str) == sel_tx].iloc[0]
     st.write(f"Score: **{int(row['score'])}** — Penalidade total: **{int(row.get('penalty_total',0))}**")
-    # JSON completo (weights + contrib)
     try:
         st.json(json.loads(row.get("explain", "{}")))
     except Exception:
         st.write("(explain inválido)")
-
-    # Barras horizontais de contribuição
     contrib = parse_contrib_dict(row.get("explain", "{}"))
     if contrib:
         df_bar = pd.DataFrame({"regra": list(contrib.keys()), "pct": list(contrib.values())})
@@ -231,7 +226,7 @@ with st.expander("Fila de retenção (pending_review)", expanded=False):
     else:
         st.dataframe(pending, use_container_width=True)
 
-# ---------------------- Relatório em PDF ----------------------
+# ---------------------- Relatório (PDF) ----------------------
 st.markdown("### Relatório (PDF)")
 st.caption("Gera PDF das transações críticas (score < limiar atual) usando o arquivo selecionado.")
 
