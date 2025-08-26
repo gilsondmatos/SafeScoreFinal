@@ -12,7 +12,7 @@ def get_env_int(name: str, default: int) -> int:
 
 DEFAULT_WEIGHTS: Dict[str,int] = {
     "blacklist":60, "watchlist":30, "high_amount":25, "unusual_hour":15,
-    "new_address":20, "velocity":20, "sensitive_token":15, "sensitive_method":15,
+    "new_address":50, "velocity":20, "sensitive_token":15, "sensitive_method":15,
 }
 
 @dataclass
